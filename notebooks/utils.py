@@ -1,20 +1,60 @@
-import os
+# utils.py
 
+import os
 import tiktoken
 from neo4j import GraphDatabase
-from openai import OpenAI
+from sentence_transformers import SentenceTransformer
+from dotenv import load_dotenv
+
+# ----------------------------------------------------
+# 1) Load environment variables from .env
+# ----------------------------------------------------
+load_dotenv()    # <-- IMPORTANT: loads NEO4J_URI, NEO4J_USERNAME, NEO4J_PASSWORD
+
+# ----------------------------------------------------
+# 2) Local embedding model (NO OpenAI needed)
+# ----------------------------------------------------
+embedding_model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
+EMBED_DIM = embedding_model.get_sentence_embedding_dimension()  # = 384
+
+
+# ----------------------------------------------------
+# 3) Local Chat (optional) - Ollama stub
+# ----------------------------------------------------
+def local_chat(prompt: str) -> str:
+    """
+    If Ollama is installed, this will call it.
+    Otherwise, returns a safe default message.
+    """
+    try:
+        import subprocess
+        cmd = ["ollama", "run", "llama3", prompt]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        return result.stdout.strip()
+    except Exception:
+        return "(Local LLM not configured)"
+
+
+# ----------------------------------------------------
+# 4) Neo4j Driver - Aura or local depending on .env
+# ----------------------------------------------------
+NEO4J_URI = os.getenv("NEO4J_URI")
+NEO4J_USERNAME = os.getenv("NEO4J_USERNAME")
+NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD")
+
+if not NEO4J_URI:
+    raise ValueError("❌ NEO4J_URI is missing. Check your .env or Codespace variables.")
 
 neo4j_driver = GraphDatabase.driver(
-    os.environ.get("NEO4J_URI"),
-    auth=(os.environ.get("NEO4J_USERNAME"), os.environ.get("NEO4J_PASSWORD")),
-    notifications_min_severity="OFF"
-)
-
-open_ai_client = OpenAI(
-    api_key=os.environ.get("OPENAI_API_KEY"),
+    NEO4J_URI,
+    auth=(NEO4J_USERNAME, NEO4J_PASSWORD),
+    notifications_min_severity="OFF",
 )
 
 
+# ----------------------------------------------------
+# 5) Chunking
+# ----------------------------------------------------
 def chunk_text(text, chunk_size, overlap, split_on_whitespace_only=True):
     chunks = []
     index = 0
@@ -44,37 +84,33 @@ def chunk_text(text, chunk_size, overlap, split_on_whitespace_only=True):
     return chunks
 
 
-def num_tokens_from_string(string: str, model: str = "gpt-4") -> int:
-    """Returns the number of tokens in a text string."""
-    encoding = tiktoken.encoding_for_model(model)
-    num_tokens = len(encoding.encode(string))
-    return num_tokens
+# ----------------------------------------------------
+# 6) Token counting
+# ----------------------------------------------------
+def num_tokens_from_string(string: str, model: str = "gpt-4"):
+    encoding = tiktoken.get_encoding("cl100k_base")
+    return len(encoding.encode(string))
 
 
-def embed(texts, model="text-embedding-3-small"):
-    response = open_ai_client.embeddings.create(
-        input=texts,
-        model=model,
-    )
-    return list(map(lambda n: n.embedding, response.data))
+# ----------------------------------------------------
+# 7) Local embeddings (replacement for OpenAI embeddings)
+# ----------------------------------------------------
+def embed(texts):
+    """Return locally generated embeddings (list of 384-dim vectors)."""
+    return embedding_model.encode(texts).tolist()
 
 
-def chat(messages, model="gpt-4o", temperature=0, config={}):
-    response = open_ai_client.chat.completions.create(
-        model=model,
-        temperature=temperature,
-        messages=messages,
-        **config,
-    )
-    return response.choices[0].message.content
+# ----------------------------------------------------
+# 8) Chat + tool_choice (local)
+# ----------------------------------------------------
+def chat(messages, model="local", temperature=0, config={}):
+    # Combine messages into single prompt
+    prompt = "\n".join([m["content"] for m in messages])
+    return local_chat(prompt)
 
 
-def tool_choice(messages, model="gpt-4o", temperature=0, tools=[], config={}):
-    response = open_ai_client.chat.completions.create(
-        model=model,
-        temperature=temperature,
-        messages=messages,
-        tools=tools or None,
-        **config,
-    )
-    return response.choices[0].message.tool_calls
+def tool_choice(messages, model="local", temperature=0, tools=[], config={}):
+    return {
+        "tool": "none",
+        "output": chat(messages)
+    }
